@@ -1,0 +1,524 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============ UTILISATEURS ============
+
+enum UserRole {
+  CLIENT
+  AGENT
+  DRIVER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum AccountStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+model User {
+  id            String        @id @default(cuid())
+  email         String        @unique
+  phone         String?       @unique
+  passwordHash  String
+  firstName     String
+  lastName      String
+  role          UserRole      @default(CLIENT)
+  status        AccountStatus @default(PENDING)
+  avatar        String?
+  preferredLang String        @default("fr")
+  
+  // Relations
+  addresses     Address[]
+  shipments     Shipment[]    @relation("ClientShipments")
+  agentCountry  Country?      @relation("CountryAgents", fields: [countryId], references: [id])
+  countryId     String?
+  deliveries    Shipment[]    @relation("DriverDeliveries")
+  notifications Notification[]
+  
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  lastLoginAt   DateTime?
+  
+  @@index([email])
+  @@index([phone])
+  @@index([role])
+}
+
+model Address {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label       String    // "Maison", "Bureau", etc.
+  fullName    String
+  phone       String
+  street      String
+  city        String
+  state       String?
+  postalCode  String?
+  countryId   String
+  country     Country   @relation(fields: [countryId], references: [id])
+  latitude    Float?
+  longitude   Float?
+  isDefault   Boolean   @default(false)
+  
+  shipmentsFrom Shipment[] @relation("ShipmentOrigin")
+  shipmentsTo   Shipment[] @relation("ShipmentDestination")
+  
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([userId])
+}
+
+// ============ GÉOGRAPHIE ============
+
+model Country {
+  id           String   @id @default(cuid())
+  code         String   @unique // ISO 3166-1 alpha-2
+  name         String
+  nameFr       String
+  nameLocal    String?
+  currency     String   // Code devise ISO
+  phonePrefix  String
+  isActive     Boolean  @default(true)
+  isOrigin     Boolean  @default(false) // Peut envoyer
+  isDestination Boolean @default(false) // Peut recevoir
+  
+  // Relations
+  warehouses   Warehouse[]
+  agents       User[]      @relation("CountryAgents")
+  addresses    Address[]
+  routesFrom   Route[]     @relation("RouteOrigin")
+  routesTo     Route[]     @relation("RouteDestination")
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Warehouse {
+  id          String   @id @default(cuid())
+  name        String
+  countryId   String
+  country     Country  @relation(fields: [countryId], references: [id])
+  city        String
+  address     String
+  phone       String
+  email       String?
+  latitude    Float?
+  longitude   Float?
+  isActive    Boolean  @default(true)
+  isHub       Boolean  @default(false) // Hub principal
+  capacity    Int?     // Capacité en m³
+  
+  trackingEvents TrackingEvent[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([countryId])
+}
+
+// ============ TARIFICATION ============
+
+model Route {
+  id              String   @id @default(cuid())
+  originId        String
+  origin          Country  @relation("RouteOrigin", fields: [originId], references: [id])
+  destinationId   String
+  destination     Country  @relation("RouteDestination", fields: [destinationId], references: [id])
+  
+  // Tarifs
+  pricePerKg      Decimal  @db.Decimal(10, 2)
+  minWeight       Decimal  @default(0.5) @db.Decimal(10, 2)
+  fixedFee        Decimal  @default(0) @db.Decimal(10, 2) // Frais fixes
+  volumeFactor    Int      @default(5000) // Diviseur volumétrique
+  
+  // Coûts internes (invisible client)
+  costPerKg       Decimal  @db.Decimal(10, 2)
+  customsFee      Decimal  @default(0) @db.Decimal(10, 2)
+  handlingFee     Decimal  @default(0) @db.Decimal(10, 2)
+  
+  // Délais
+  estimatedDaysMin Int     @default(7)
+  estimatedDaysMax Int     @default(14)
+  
+  isActive        Boolean  @default(true)
+  
+  shipments       Shipment[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@unique([originId, destinationId])
+  @@index([originId])
+  @@index([destinationId])
+}
+
+// ============ ENVOIS ============
+
+enum ShipmentType {
+  PARCEL          // Colis particulier
+  CARGO           // Cargo commercial
+  CONSOLIDATED    // Groupage
+  PURCHASE        // Achat & réexpédition
+}
+
+enum ShipmentStatus {
+  DRAFT
+  PENDING_PAYMENT
+  PAID
+  AWAITING_PICKUP
+  COLLECTED
+  AT_ORIGIN_WAREHOUSE
+  EXPORT_CUSTOMS
+  IN_TRANSIT
+  ARRIVED_DESTINATION
+  IMPORT_CUSTOMS
+  AT_DESTINATION_WAREHOUSE
+  OUT_FOR_DELIVERY
+  DELIVERED
+  RETURNED
+  CANCELLED
+  EXCEPTION
+}
+
+enum PaymentStatus {
+  PENDING
+  PARTIAL
+  PAID
+  REFUNDED
+  FAILED
+}
+
+model Shipment {
+  id              String          @id @default(cuid())
+  trackingNumber  String          @unique
+  
+  // Client
+  clientId        String
+  client          User            @relation("ClientShipments", fields: [clientId], references: [id])
+  
+  // Adresses
+  originAddressId String
+  originAddress   Address         @relation("ShipmentOrigin", fields: [originAddressId], references: [id])
+  destAddressId   String
+  destAddress     Address         @relation("ShipmentDestination", fields: [destAddressId], references: [id])
+  
+  // Route & Type
+  routeId         String
+  route           Route           @relation(fields: [routeId], references: [id])
+  type            ShipmentType    @default(PARCEL)
+  
+  // Dimensions
+  weightKg        Decimal         @db.Decimal(10, 3)
+  lengthCm        Decimal?        @db.Decimal(10, 2)
+  widthCm         Decimal?        @db.Decimal(10, 2)
+  heightCm        Decimal?        @db.Decimal(10, 2)
+  volumeWeight    Decimal?        @db.Decimal(10, 3) // Poids volumétrique calculé
+  chargeableWeight Decimal?       @db.Decimal(10, 3) // max(réel, volumétrique)
+  
+  // Contenu
+  description     String
+  declaredValue   Decimal?        @db.Decimal(10, 2)
+  currency        String          @default("EUR")
+  itemCount       Int             @default(1)
+  isFragile       Boolean         @default(false)
+  requiresInsurance Boolean       @default(false)
+  
+  // Prix
+  basePrice       Decimal         @db.Decimal(10, 2)
+  fees            Decimal         @default(0) @db.Decimal(10, 2)
+  insurance       Decimal         @default(0) @db.Decimal(10, 2)
+  discount        Decimal         @default(0) @db.Decimal(10, 2)
+  totalPrice      Decimal         @db.Decimal(10, 2)
+  
+  // Coûts internes
+  actualCost      Decimal?        @db.Decimal(10, 2)
+  profit          Decimal?        @db.Decimal(10, 2)
+  
+  // Statuts
+  status          ShipmentStatus  @default(DRAFT)
+  paymentStatus   PaymentStatus   @default(PENDING)
+  
+  // Dates
+  estimatedDelivery DateTime?
+  actualDelivery    DateTime?
+  
+  // Assignations
+  driverId        String?
+  driver          User?           @relation("DriverDeliveries", fields: [driverId], references: [id])
+  
+  // Preuves
+  deliveryProof   String?         // URL photo
+  signature       String?         // URL signature
+  deliveryNotes   String?
+  
+  // Relations
+  items           ShipmentItem[]
+  trackingEvents  TrackingEvent[]
+  payments        Payment[]
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@index([clientId])
+  @@index([status])
+  @@index([trackingNumber])
+  @@index([createdAt])
+}
+
+model ShipmentItem {
+  id          String   @id @default(cuid())
+  shipmentId  String
+  shipment    Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  
+  name        String
+  description String?
+  quantity    Int      @default(1)
+  weightKg    Decimal? @db.Decimal(10, 3)
+  value       Decimal? @db.Decimal(10, 2)
+  hsCode      String?  // Code douanier
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([shipmentId])
+}
+
+model TrackingEvent {
+  id          String         @id @default(cuid())
+  shipmentId  String
+  shipment    Shipment       @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  
+  status      ShipmentStatus
+  location    String?
+  warehouseId String?
+  warehouse   Warehouse?     @relation(fields: [warehouseId], references: [id])
+  
+  notes       String?
+  isPublic    Boolean        @default(true) // Visible par le client
+  
+  latitude    Float?
+  longitude   Float?
+  
+  createdBy   String?        // ID de l'agent/système
+  
+  createdAt   DateTime       @default(now())
+  
+  @@index([shipmentId])
+  @@index([createdAt])
+}
+
+// ============ PAIEMENTS ============
+
+enum PaymentMethod {
+  CARD
+  BANK_TRANSFER
+  MOBILE_MONEY
+  CASH
+  PAYPAL
+}
+
+enum PaymentProvider {
+  STRIPE
+  PAYPAL
+  MTN_MOMO
+  ORANGE_MONEY
+  WAVE
+  MANUAL
+}
+
+model Payment {
+  id              String          @id @default(cuid())
+  shipmentId      String
+  shipment        Shipment        @relation(fields: [shipmentId], references: [id])
+  
+  amount          Decimal         @db.Decimal(10, 2)
+  currency        String
+  method          PaymentMethod
+  provider        PaymentProvider
+  
+  providerRef     String?         // Référence externe
+  status          PaymentStatus   @default(PENDING)
+  
+  paidAt          DateTime?
+  failureReason   String?
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@index([shipmentId])
+  @@index([providerRef])
+}
+
+// ============ NOTIFICATIONS ============
+
+enum NotificationType {
+  SHIPMENT_UPDATE
+  PAYMENT_RECEIVED
+  DELIVERY_SCHEDULED
+  DELIVERED
+  EXCEPTION
+  PROMO
+  SYSTEM
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  type      NotificationType
+  title     String
+  message   String
+  data      Json?            // Données additionnelles
+  
+  isRead    Boolean          @default(false)
+  readAt    DateTime?
+  
+  createdAt DateTime         @default(now())
+  
+  @@index([userId])
+  @@index([isRead])
+}
+{
+  "name": "logistics-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "14.2.0",
+    "react": "18.3.0",
+    "react-dom": "18.3.0",
+    "@tanstack/react-query": "5.32.0",
+    "@supabase/supabase-js": "2.43.0",
+    "zustand": "4.5.2",
+    "zod": "3.23.0",
+    "react-hook-form": "7.51.0",
+    "@hookform/resolvers": "3.3.4",
+    "lucide-react": "0.372.0",
+    "framer-motion": "11.1.0",
+    "date-fns": "3.6.0",
+    "clsx": "2.1.1",
+    "tailwind-merge": "2.3.0"
+  },
+  "devDependencies": {
+    "typescript": "5.4.0",
+    "@types/react": "18.3.0",
+    "@types/node": "20.12.0",
+    "tailwindcss": "3.4.3",
+    "autoprefixer": "10.4.19",
+    "postcss": "8.4.38"
+  }
+}
+import type { Config } from 'tailwindcss'
+
+const config: Config = {
+  content: [
+    './src/**/*.{js,ts,jsx,tsx,mdx}',
+    '../../packages/ui/**/*.{js,ts,jsx,tsx}'
+  ],
+  theme: {
+    extend: {
+      colors: {
+        primary: {
+          50: '#eff6ff',
+          100: '#dbeafe',
+          200: '#bfdbfe',
+          300: '#93c5fd',
+          400: '#60a5fa',
+          500: '#3b82f6',
+          600: '#2563eb',
+          700: '#1d4ed8',
+          800: '#1e40af',
+          900: '#1e3a8a',
+          950: '#172554'
+        },
+        accent: {
+          50: '#fdf4ff',
+          100: '#fae8ff',
+          200: '#f5d0fe',
+          300: '#f0abfc',
+          400: '#e879f9',
+          500: '#d946ef',
+          600: '#c026d3',
+          700: '#a21caf',
+          800: '#86198f',
+          900: '#701a75'
+        }
+      },
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif']
+      }
+    }
+  },
+  plugins: []
+}
+
+export default config
+import { clsx, type ClassValue } from 'clsx'
+import { twMerge } from 'tailwind-merge'
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+export function formatPrice(amount: number, currency = 'EUR'): string {
+  return new Intl.NumberFormat('fr-FR', {
+    style: 'currency',
+    currency
+  }).format(amount)
+}
+
+export function formatWeight(kg: number): string {
+  if (kg < 1) {
+    return `${Math.round(kg * 1000)} g`
+  }
+  return `${kg.toFixed(2)} kg`
+}
+
+export function formatDate(date: Date | string, options?: Intl.DateTimeFormatOptions): string {
+  const d = typeof date === 'string' ? new Date(date) : date
+  return new Intl.DateTimeFormat('fr-FR', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    ...options
+  }).format(d)
+}
+
+export function generateTrackingNumber(): string {
+  const prefix = 'GL'
+  const timestamp = Date.now().toString(36).toUpperCase()
+  const random = Math.random().toString(36).substring(2, 6).toUpperCase()
+  return `${prefix}${timestamp}${random}`
+}
+
+export function calculateVolumeWeight(
+  lengthCm: number,
+  widthCm: number,
+  heightCm: number,
+  divisor = 5000
+): number {
+  return (lengthCm * widthCm * heightCm) / divisor
+}
+
+export function calculateChargeableWeight(
+  actualWeight: number,
+  volumeWeight: number
+): number {
+  return Math.max(actualWeight, volumeWeight)
+}
